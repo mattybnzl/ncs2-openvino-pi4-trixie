@@ -11,7 +11,8 @@ from source - see [`docs/NCS2-OPENVINO-BUILD-GUIDE.md`](docs/NCS2-OPENVINO-BUILD
 ## Features
 - Live MJPEG video stream in the browser
 - Manual pan/tilt control + centre
-- **Face tracking** (OpenCV Haar cascade)
+- **Face tracking** - NCS2 SSD detector (`face-detection-retail-0004`, ~45 FPS) when the stick
+  is present, automatic fallback to an OpenCV Haar cascade on CPU when it isn't
 - **Object tracking** (YOLOv8, 80 COCO classes; selectable target class)
 - **Runtime model switching** between YOLOv8n (fast) and YOLOv8s (accurate) - both pre-compiled
   on the stick at startup, so switching is instant (no recompile). Selectable from the UI.
@@ -25,6 +26,7 @@ from source - see [`docs/NCS2-OPENVINO-BUILD-GUIDE.md`](docs/NCS2-OPENVINO-BUILD
 |---|---|---|---|
 | YOLOv8n (~3.2M params) | 153 ms · **6.5 FPS** | 536 ms · 1.9 FPS | 3.4x |
 | YOLOv8s (~11M params) | 307 ms · **3.3 FPS** | 1416 ms · 0.7 FPS | 4.6x |
+| face-detection-retail-0004 (SSD, face mode) | 22 ms · **45 FPS** | Haar cascade (fallback) | dedicated detector |
 
 The headline result: **YOLOv8s on the NCS2 (3.3 FPS) is faster than YOLOv8n on the CPU
 (1.9 FPS)** while being a more accurate model. The stick doesn't just speed things up - it

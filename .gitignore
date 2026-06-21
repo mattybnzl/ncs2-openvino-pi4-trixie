@@ -1,7 +1,9 @@
-# Models (download separately - see models/README.md)
+# Models (download separately - see models/README.md and omz/README.md)
 models/*.onnx
 models/*.xml
 models/*.bin
+omz/**/*.xml
+omz/**/*.bin
 
 # Logs
 *.log

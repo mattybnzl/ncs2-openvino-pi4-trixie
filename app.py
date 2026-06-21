@@ -228,6 +228,26 @@ def detect_objects(frame, target_class):
     return dets
 
 
+# Face mode: NCS2 SSD detector (fast, accurate) with OpenCV Haar cascade as the CPU fallback.
+FACE_MODEL = "face-detection-retail-0004"
+FACE_CONF = 0.6
+
+
+def detect_faces(frame):
+    """Try the NCS2 face detector, fall back to the Haar cascade on CPU.
+    Returns list of (x, y, w, h). Updates last_backend."""
+    global last_backend
+    if USE_NCS:
+        dets = ncs_detect(frame, FACE_MODEL, conf_thresh=FACE_CONF, target_class=None)
+        if dets is not None:
+            last_backend = "NCS"
+            return [(x, y, w, h) for (x, y, w, h, _cls, _conf) in dets]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
+    last_backend = "CPU"
+    return [tuple(int(v) for v in f) for f in faces]
+
+
 def clamp(val, lo, hi):
     return max(lo, min(hi, val))
 
@@ -274,7 +294,12 @@ def capture_loop():
                 if label:
                     cv2.putText(frame, label, (x, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-            backend = f" {last_backend}/{current_model}" if (tracking_enabled and track_mode == "object") else ""
+            if tracking_enabled and track_mode == "object":
+                backend = f" {last_backend}/{current_model}"
+            elif tracking_enabled and track_mode == "face":
+                backend = f" {last_backend}"
+            else:
+                backend = ""
             status = (f"{'TRACKING' if tracking_enabled else 'MANUAL'} [{track_mode}{backend}]  "
                       f"pan:{pan_angle:.0f} tilt:{tilt_angle:.0f}")
             cv2.putText(frame, status, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
@@ -307,9 +332,8 @@ def detect_loop():
                 continue
 
             if track_mode == "face":
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = face_cascade.detectMultiScale(gray, 1.1, 5, minSize=(60, 60))
-                if len(faces) > 0:
+                faces = detect_faces(frame)
+                if faces:
                     x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
                     with det_lock:
                         latest_dets = [(int(x), int(y), int(w), int(h), "", (0, 255, 0))]
@@ -317,7 +341,7 @@ def detect_loop():
                 else:
                     with det_lock:
                         latest_dets = []
-                time.sleep(0.01)
+                time.sleep(0.005)
 
             elif track_mode == "object":
                 dets = detect_objects(frame, track_target_class)
