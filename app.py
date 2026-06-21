@@ -459,7 +459,9 @@ def stream():
 @app.route("/move", methods=["POST"])
 def move():
     data = request.get_json()
-    set_pan_tilt(pan_angle + data.get("pan_delta", 0), tilt_angle - data.get("tilt_delta", 0))
+    # Camera is mounted upside-down (frame flipped 180deg), so BOTH axes are inverted
+    # relative to the displayed image - mirror pan and tilt to match the user's view.
+    set_pan_tilt(pan_angle - data.get("pan_delta", 0), tilt_angle - data.get("tilt_delta", 0))
     return jsonify(pan=round(pan_angle), tilt=round(tilt_angle))
 
 
