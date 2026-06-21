@@ -1,0 +1,17 @@
+# Models (download separately - see models/README.md)
+models/*.onnx
+models/*.xml
+models/*.bin
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS
+.DS_Store
