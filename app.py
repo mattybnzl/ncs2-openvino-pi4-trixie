@@ -19,6 +19,7 @@ Config via environment variables:
 """
 
 import os
+import glob
 import threading
 import time
 import socket
@@ -116,14 +117,14 @@ def _recvall(conn, n):
     return buf
 
 
-def ncs_detect(frame, conf_thresh=0.45, target_class=None):
+def ncs_detect(frame, model_name, conf_thresh=0.45, target_class=None):
     """Run detection on the NCS2 service. Returns a detection list, or None to signal fallback."""
     global ncs_conn
     with ncs_lock:
         if ncs_conn is None and not _ncs_connect():
             return None
         try:
-            req = {"frame": frame, "conf": conf_thresh, "target_class": target_class}
+            req = {"frame": frame, "conf": conf_thresh, "target_class": target_class, "model": model_name}
             data = pickle.dumps(req, protocol=pickle.HIGHEST_PROTOCOL)
             ncs_conn.sendall(struct.pack(">I", len(data)) + data)
             raw = _recvall(ncs_conn, 4)
@@ -146,29 +147,45 @@ def ncs_detect(frame, conf_thresh=0.45, target_class=None):
             return None
 
 
-# --- YOLOv8 ONNX model (CPU fallback path) ---
-MODEL_PATH = os.environ.get("YOLO_MODEL", os.path.join(APP_DIR, "models", "yolov8n.onnx"))
-yolo_session = None
-yolo_input_name = None
+# --- YOLO models (CPU fallback path; NCS2 path selects the same model by name) ---
+MODELS_DIR = os.environ.get("MODELS_DIR", os.path.join(APP_DIR, "models"))
+AVAILABLE_MODELS = [os.path.splitext(os.path.basename(p))[0]
+                    for p in sorted(glob.glob(os.path.join(MODELS_DIR, "*.onnx")))]
+current_model = os.environ.get(
+    "YOLO_MODEL_NAME",
+    "yolov8s" if "yolov8s" in AVAILABLE_MODELS else (AVAILABLE_MODELS[0] if AVAILABLE_MODELS else "yolov8n"))
+
+cpu_sessions = {}         # name -> (session, input_name), lazily loaded
+cpu_sess_lock = threading.Lock()
+
+
+def _cpu_session(name):
+    with cpu_sess_lock:
+        if name not in cpu_sessions:
+            path = os.path.join(MODELS_DIR, name + ".onnx")
+            opts = ort.SessionOptions()
+            opts.inter_op_num_threads = 2
+            opts.intra_op_num_threads = 4
+            sess = ort.InferenceSession(path, sess_options=opts, providers=["CPUExecutionProvider"])
+            cpu_sessions[name] = (sess, sess.get_inputs()[0].name)
+            print(f"CPU session loaded for {name}")
+        return cpu_sessions[name]
 
 
 def load_yolo():
-    global yolo_session, yolo_input_name
+    """Pre-load the default model's CPU session so the first fallback isn't slow."""
     try:
-        opts = ort.SessionOptions()
-        opts.inter_op_num_threads = 2
-        opts.intra_op_num_threads = 4
-        yolo_session = ort.InferenceSession(MODEL_PATH, sess_options=opts,
-                                             providers=["CPUExecutionProvider"])
-        yolo_input_name = yolo_session.get_inputs()[0].name
-        print(f"YOLOv8n CPU fallback loaded: input={yolo_input_name}")
+        _cpu_session(current_model)
     except Exception as e:
-        print(f"YOLO CPU load failed: {e}")
+        print(f"YOLO CPU preload failed for {current_model}: {e}")
 
 
-def yolo_detect_cpu(frame, conf_thresh=0.45, target_class=None):
+def yolo_detect_cpu(frame, model_name, conf_thresh=0.45, target_class=None):
     """CPU onnxruntime fallback. Returns list of (x, y, w, h, class_id, conf)."""
-    if yolo_session is None:
+    try:
+        sess, input_name = _cpu_session(model_name)
+    except Exception as e:
+        print(f"CPU session load failed for {model_name}: {e}")
         return []
     fh, fw = frame.shape[:2]
     size = 640
@@ -176,7 +193,7 @@ def yolo_detect_cpu(frame, conf_thresh=0.45, target_class=None):
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     img = np.transpose(img, (2, 0, 1))[np.newaxis]
 
-    outputs = yolo_session.run(None, {yolo_input_name: img})[0][0]  # (84, N)
+    outputs = sess.run(None, {input_name: img})[0][0]  # (84, N)
     outputs = outputs.T
 
     boxes = []
@@ -200,12 +217,13 @@ def yolo_detect_cpu(frame, conf_thresh=0.45, target_class=None):
 def detect_objects(frame, target_class):
     """Try NCS2 first, fall back to CPU. Updates last_backend. Returns detection list."""
     global last_backend
+    model_name = current_model
     if USE_NCS:
-        dets = ncs_detect(frame, 0.45, target_class)
+        dets = ncs_detect(frame, model_name, 0.45, target_class)
         if dets is not None:
             last_backend = "NCS"
             return dets
-    dets = yolo_detect_cpu(frame, target_class=target_class)
+    dets = yolo_detect_cpu(frame, model_name, target_class=target_class)
     last_backend = "CPU"
     return dets
 
@@ -256,7 +274,7 @@ def capture_loop():
                 if label:
                     cv2.putText(frame, label, (x, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-            backend = f" {last_backend}" if (tracking_enabled and track_mode == "object") else ""
+            backend = f" {last_backend}/{current_model}" if (tracking_enabled and track_mode == "object") else ""
             status = (f"{'TRACKING' if tracking_enabled else 'MANUAL'} [{track_mode}{backend}]  "
                       f"pan:{pan_angle:.0f} tilt:{tilt_angle:.0f}")
             cv2.putText(frame, status, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
@@ -377,6 +395,10 @@ HTML = """<!DOCTYPE html>
     <option value="2">Car</option>
     <option value="39">Bottle</option>
   </select>
+  <select id="model-select" onchange="setModel(this.value)" style="display:none">
+    <option value="yolov8n">YOLOv8n (fast)</option>
+    <option value="yolov8s">YOLOv8s (accurate)</option>
+  </select>
 </div>
 
 <p id="status" style="color:#888; font-size:0.82rem;"></p>
@@ -403,12 +425,22 @@ async function toggleTrack() {
 async function setMode(mode) {
   await fetch('/track/mode', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({mode})});
-  document.getElementById('class-select').style.display = mode === 'object' ? 'inline-block' : 'none';
+  const show = mode === 'object' ? 'inline-block' : 'none';
+  document.getElementById('class-select').style.display = show;
+  document.getElementById('model-select').style.display = show;
 }
 async function setClass(cls) {
   await fetch('/track/class', {method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({class_id: cls})});
 }
+async function setModel(m) {
+  await fetch('/track/model', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({model: m})});
+}
+// Sync the model dropdown to the server's current model on load
+fetch('/status').then(r => r.json()).then(d => {
+  if (d.model) document.getElementById('model-select').value = d.model;
+}).catch(() => {});
 </script>
 </body>
 </html>"""
@@ -458,10 +490,21 @@ def track_class_set():
     return jsonify(class_id=track_target_class)
 
 
+@app.route("/track/model", methods=["POST"])
+def track_model_set():
+    global current_model
+    m = request.get_json().get("model", current_model)
+    if (not AVAILABLE_MODELS) or (m in AVAILABLE_MODELS):
+        current_model = m
+    return jsonify(model=current_model)
+
+
 @app.route("/status")
 def status():
     return jsonify(pan=round(pan_angle), tilt=round(tilt_angle),
-                   tracking=tracking_enabled, mode=track_mode, backend=last_backend)
+                   tracking=tracking_enabled, mode=track_mode,
+                   backend=last_backend, model=current_model,
+                   available_models=AVAILABLE_MODELS)
 
 
 if __name__ == "__main__":

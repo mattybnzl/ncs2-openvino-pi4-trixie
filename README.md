@@ -12,19 +12,24 @@ from source - see [`docs/NCS2-OPENVINO-BUILD-GUIDE.md`](docs/NCS2-OPENVINO-BUILD
 - Live MJPEG video stream in the browser
 - Manual pan/tilt control + centre
 - **Face tracking** (OpenCV Haar cascade)
-- **Object tracking** (YOLOv8n, 80 COCO classes; selectable target class)
+- **Object tracking** (YOLOv8, 80 COCO classes; selectable target class)
+- **Runtime model switching** between YOLOv8n (fast) and YOLOv8s (accurate) - both pre-compiled
+  on the stick at startup, so switching is instant (no recompile). Selectable from the UI.
 - PD servo controller for smooth tracking
 - Detection runs in a worker thread, decoupled from the stream, so inference never stutters video
-- NCS2 acceleration with seamless CPU fallback and self-heal; the active backend is shown in
-  the overlay and at `/status`
+- NCS2 acceleration with seamless CPU fallback and self-heal; the active backend + model are
+  shown in the overlay and at `/status`
 
-## Performance (YOLOv8n, 640x640, Pi 4)
-| Backend | Latency | FPS | CPU |
+## Performance (640x640, Pi 4): {nano, small} x {NCS2, CPU}
+| Model | NCS2 | CPU (4 threads) | NCS2 speedup |
 |---|---|---|---|
-| NCS2 / Myriad X | ~151 ms | ~6.6 | offloaded |
-| onnxruntime CPU (4 threads) | ~545 ms | ~1.8 | all cores busy |
+| YOLOv8n (~3.2M params) | 153 ms · **6.5 FPS** | 536 ms · 1.9 FPS | 3.4x |
+| YOLOv8s (~11M params) | 307 ms · **3.3 FPS** | 1416 ms · 0.7 FPS | 4.6x |
 
-~3.6x faster on the stick, and it frees the CPU for capture/streaming/servo control.
+The headline result: **YOLOv8s on the NCS2 (3.3 FPS) is faster than YOLOv8n on the CPU
+(1.9 FPS)** while being a more accurate model. The stick doesn't just speed things up - it
+unlocks a model class the Pi's CPU can't run in real time, and frees the CPU for
+capture/streaming/servo control.
 
 ## Hardware
 - Raspberry Pi 4 (4 GB+), 64-bit OS (developed on Debian Trixie)
@@ -82,7 +87,8 @@ process and the app talks to it over a Unix socket:
 | `/track/toggle` | POST | Tracking on/off |
 | `/track/mode` | POST | `{mode: "face"\|"object"}` |
 | `/track/class` | POST | `{class_id: <COCO index>}` |
-| `/status` | GET | pan/tilt/tracking/mode/backend |
+| `/track/model` | POST | `{model: "yolov8n"\|"yolov8s"}` - switch model at runtime |
+| `/status` | GET | pan/tilt/tracking/mode/backend/model/available_models |
 
 ## Notes
 - Camera is mounted upside-down in this build (`cv2.flip(frame, -1)`); remove that line if yours isn't.
