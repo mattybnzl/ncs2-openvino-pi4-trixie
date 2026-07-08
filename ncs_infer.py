@@ -139,14 +139,60 @@ def wait_for_myriad(core, timeout=45.0, interval=2.0):
 
 
 def model_registry():
-    """{name: {"path", "kind"}} for YOLO ONNX in MODELS_DIR + present OMZ SSD models."""
+    """{name: {"path", "kind"}} for YOLO ONNX in MODELS_DIR + present OMZ SSD models.
+
+    NCS_MODELS (comma-separated allowlist) restricts what is compiled onto the stick. On a
+    marginal stick the large 640x640 YOLO graphs can fail deterministically AND corrupt an
+    already-loaded model when their compile is attempted, so limiting to the reliable model
+    (e.g. NCS_MODELS=face-detection-retail-0004) gives a clean, stable NCS path. Unset = all.
+    """
     reg = {}
     for p in sorted(glob.glob(os.path.join(MODELS_DIR, "*.onnx"))):
         reg[os.path.splitext(os.path.basename(p))[0]] = {"path": p, "kind": "yolo"}
     for name, info in OMZ_MODELS.items():
         if os.path.exists(info["path"]):
             reg[name] = info
+
+    allow = os.environ.get("NCS_MODELS", "").strip()
+    if allow:
+        wanted = {n.strip() for n in allow.split(",") if n.strip()}
+        reg = {n: info for n, info in reg.items() if n in wanted}
+        missing = wanted - set(reg)
+        if missing:
+            print(f"WARN: NCS_MODELS names not found/available: {sorted(missing)}", flush=True)
     return reg
+
+
+# Compile-retry tuning. The Myriad X / XLink link is intermittently unreliable on the
+# larger 640x640 graphs (they throw "Failed to allocate graph" / "Failed to read output
+# from FIFO" NC_ERROR that a retry usually clears); the small 300x300 SSD is more robust.
+COMPILE_ATTEMPTS = int(os.environ.get("NCS_COMPILE_ATTEMPTS", "3"))
+COMPILE_DELAY = float(os.environ.get("NCS_COMPILE_DELAY", "2.5"))
+
+
+def compile_on_myriad(core, name, info, attempts=COMPILE_ATTEMPTS, delay=COMPILE_DELAY):
+    """Compile + warm up one model on MYRIAD, retrying on the intermittent NC_ERROR.
+    Returns (compiled_model, out_port, kind, (in_h, in_w)) or None if all attempts fail."""
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            t0 = time.time()
+            model = core.read_model(info["path"])
+            ish = list(model.input().shape)  # [1,3,H,W]
+            in_h, in_w = int(ish[2]), int(ish[3])
+            cm = core.compile_model(model, "MYRIAD")
+            cm([np.zeros((1, 3, in_h, in_w), np.float32)])  # warmup (also fails fast on a bad link)
+            tag = "" if attempt == 1 else f" [attempt {attempt}/{attempts}]"
+            print(f"compiled {name} [{info['kind']} {in_w}x{in_h}] on MYRIAD "
+                  f"({time.time()-t0:.1f}s){tag}", flush=True)
+            return (cm, cm.output(0), info["kind"], (in_h, in_w))
+        except Exception as e:
+            last_err = e
+            print(f"WARN: compile {name} attempt {attempt}/{attempts} failed: {repr(e)[:140]}", flush=True)
+            if attempt < attempts:
+                time.sleep(delay)  # let the stick settle before retrying
+    print(f"WARN: could not compile {name} after {attempts} attempts: {repr(last_err)[:140]}", flush=True)
+    return None
 
 
 def main():
@@ -155,24 +201,23 @@ def main():
         print("ERROR: MYRIAD device not present after wait; exiting so app uses CPU fallback.", flush=True)
         sys.exit(1)
 
+    time.sleep(2.0)  # let freshly-booted firmware settle; the first XLink transaction after
+                     # enumeration is the one most prone to a spurious NC_ERROR
+
     reg = model_registry()
     if not reg:
         print(f"ERROR: no models found (MODELS_DIR={MODELS_DIR}); exiting.", flush=True)
         sys.exit(1)
 
+    # Compile the smaller SSD models first: they are the most reliable, so we secure a
+    # working NCS path before risking the larger, flakier YOLO graphs.
+    ordered = sorted(reg.items(), key=lambda kv: 0 if kv[1]["kind"] == "ssd" else 1)
+
     compiled = {}  # name -> (compiled_model, out_port, kind, (in_h, in_w))
-    for name, info in reg.items():
-        try:
-            t0 = time.time()
-            model = core.read_model(info["path"])
-            ish = list(model.input().shape)  # [1,3,H,W]
-            in_h, in_w = int(ish[2]), int(ish[3])
-            cm = core.compile_model(model, "MYRIAD")
-            cm([np.zeros((1, 3, in_h, in_w), np.float32)])  # warmup
-            compiled[name] = (cm, cm.output(0), info["kind"], (in_h, in_w))
-            print(f"compiled {name} [{info['kind']} {in_w}x{in_h}] on MYRIAD ({time.time()-t0:.1f}s)", flush=True)
-        except Exception as e:
-            print(f"WARN: could not compile {name}: {repr(e)[:160]}", flush=True)
+    for name, info in ordered:
+        entry = compile_on_myriad(core, name, info)
+        if entry is not None:
+            compiled[name] = entry
 
     if not compiled:
         print("ERROR: no model compiled on MYRIAD; exiting so app uses CPU fallback.", flush=True)
