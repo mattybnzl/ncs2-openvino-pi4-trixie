@@ -274,6 +274,12 @@ def track_target(frame, cx, cy):
     last_tilt_err = tilt_err
 
 
+def draw_text(img, text, org, color=(255, 255, 255), scale=0.55, thick=1):
+    """Draw text with a black outline so it stays legible over any video background."""
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thick + 2, cv2.LINE_AA)
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
+
+
 def capture_loop():
     """Capture + flip + overlay detections + encode. Stays fast; never blocks on inference."""
     global latest_frame, latest_raw
@@ -289,10 +295,10 @@ def capture_loop():
             with det_lock:
                 dets = list(latest_dets)
             for (x, y, w, h, label, color) in dets:
-                cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-                cv2.circle(frame, (x + w // 2, y + h // 2), 4, color, -1)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2, cv2.LINE_AA)
+                cv2.circle(frame, (x + w // 2, y + h // 2), 4, color, -1, cv2.LINE_AA)
                 if label:
-                    cv2.putText(frame, label, (x, y - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                    draw_text(frame, label, (x, max(y - 6, 16)), color, 0.5, 1)
 
             if tracking_enabled and track_mode == "object":
                 backend = f" {last_backend}/{current_model}"
@@ -302,7 +308,11 @@ def capture_loop():
                 backend = ""
             status = (f"{'TRACKING' if tracking_enabled else 'MANUAL'} [{track_mode}{backend}]  "
                       f"pan:{pan_angle:.0f} tilt:{tilt_angle:.0f}")
-            cv2.putText(frame, status, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+            # Translucent dark strip behind the status line, then white outlined text.
+            bar = frame.copy()
+            cv2.rectangle(bar, (0, 0), (frame.shape[1], 32), (0, 0, 0), -1)
+            cv2.addWeighted(bar, 0.45, frame, 0.55, 0, frame)
+            draw_text(frame, status, (8, 22), (255, 255, 255), 0.55, 1)
 
             _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
             with stream_lock:
