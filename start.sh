@@ -10,12 +10,12 @@ OV_VENV="${OV_VENV:-$HOME/ov-venv}"          # venv with OpenVINO (Python 3.10) 
 APP_VENV="${APP_VENV:-$HOME/pantilt-env}"    # venv with flask/picamera2/pantilthat/onnxruntime
 APP_DIR="${APP_DIR:-$(cd "$(dirname "$0")" && pwd)}"  # this repo (where app.py / ncs_infer.py live)
 
-# Which models the NCS2 service compiles onto the stick. Default: face model only - the
-# large 640x640 YOLO graphs are unreliable on a marginal USB link and their failing compiles
-# can wedge the stick, so we keep the NCS path to the reliable face detector and let object
-# detection use CPU. To load ALL models (e.g. after fixing the USB cable / powered hub),
-# launch with an EMPTY value:  NCS_MODELS= ./start.sh
-NCS_MODELS="${NCS_MODELS-face-detection-retail-0004}"
+# Which models the NCS2 service compiles onto the stick. Default (empty) = all models.
+# The large 640x640 YOLO graphs need a solid USB link: on a marginal cable/connector their
+# compiles fail ("Failed to allocate graph" NC_ERROR) and can wedge the whole stick. If that
+# recurs, restrict the NCS path to the reliable small face detector (object detection then
+# uses CPU) with:  NCS_MODELS=face-detection-retail-0004 ./start.sh
+NCS_MODELS="${NCS_MODELS-}"
 export NCS_MODELS
 
 # Stop any running instances
